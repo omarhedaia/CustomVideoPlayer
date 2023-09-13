@@ -61,9 +61,11 @@ import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.Player.STATE_ENDED
 import com.google.android.exoplayer2.R
 import com.google.android.exoplayer2.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 
@@ -156,25 +158,22 @@ fun VideoPlayer(
         mutableStateOf(currentTimeSaveable)
     }
 
-    val retriever = remember {
-        MediaMetadataRetriever()
-    }
+//    val retriever = remember {
+//        MediaMetadataRetriever()
+//    }
+
     var framesIntervals by remember(totalDuration) {
-        mutableStateOf( totalDuration/1000 / 20)
+        mutableStateOf(totalDuration / 1000 / 20)
     }
-    val thumbnailFramesList = remember {
-        mutableListOf<Bitmap>()
+    var thumbnailFramesList by rememberSaveable {
+        mutableStateOf(listOf<Bitmap>())
     }
-    val thumbnailIntervals = remember {
-        mutableListOf<Long>()
+    var thumbnailIntervals by rememberSaveable {
+        mutableStateOf(listOf<Long>())
     }
-
-
-
-
 
     BackHandler(enabled = fullScreen) {
-            activity.changeOrientation()
+        activity.changeOrientation()
     }
 
     Box(
@@ -211,7 +210,8 @@ fun VideoPlayer(
 
                             }
                         }
-                        framesIntervals = totalDuration / 1000 /20
+                        if (framesIntervals == 0L && totalDuration != 0L)
+                            framesIntervals = totalDuration / 1000 / 20
                     }
                 }
 
@@ -219,28 +219,30 @@ fun VideoPlayer(
 
             exoPlayer.addListener(listener)
             exoPlayer.seekTo(currentTimeSaveable)
-            retriever.setDataSource(context,Uri.Builder().path(URLString).build())
+//            retriever.setDataSource(context,Uri.Builder().path(URLString).build())
 
 
             onDispose {
                 exoPlayer.removeListener(listener)
                 exoPlayer.release()
                 currentTimeCoroutine.cancel()
-                retriever.release()
+//                retriever.release()
                 onVideoStop(currentCompletedTime, currentVideo.id)
 
             }
         }
 
         LaunchedEffect(key1 = framesIntervals ){
-            if (framesIntervals != 0L)
-            {
-                for (i in 0 until 20){
-                    val time = i * framesIntervals
-                    thumbnailIntervals.add(time)
-                    Log.d("TAG", "VideoPlayer: thumbnail intervals = ${thumbnailIntervals}")
-                    retriever.getFrameAtTime(time*1000000,MediaMetadataRetriever.OPTION_CLOSEST)?.let { thumbnailFramesList.add(it) }
-                    Log.d("TAG", "VideoPlayer: thumbnail list = ${thumbnailFramesList}")
+            if (framesIntervals != 0L) {
+                withContext(Dispatchers.IO) {
+                    if (thumbnailIntervals.isEmpty() && thumbnailFramesList.isEmpty()) {
+                        thumbnailIntervals = getVideoIntervals(framesIntervals, 0, 20)
+                        thumbnailFramesList = getVideoThumbnails(
+                            context,
+                            Uri.Builder().path(URLString).build(),
+                            thumbnailIntervals
+                        )
+                    }
                 }
             }
         }
@@ -689,11 +691,13 @@ fun SliderWithThumbnail(
 
             val thumbX = thumbOffset
             Log.d("TAG", "SliderWithThumbnail: thumbx = ${thumbX} ")
-            val currentFrame = thumbnailFrameList.getOrNull(thumbnailIntervals.indexOfFirst { (value/1000) < it })
+            val currentFrame =
+                thumbnailFrameList.getOrNull(thumbnailIntervals.indexOfFirst { (value / 1000) < it })
             Log.d("TAG", "SliderWithThumbnail: thumbnail List = ${thumbnailFrameList} ")
             Log.d("TAG", "SliderWithThumbnail: current frame = ${currentFrame} ")
-            if (currentFrame!=null)
-            Thumb(currentFrame = currentFrame, offset = thumbX)
+            if (currentFrame != null) {
+                Thumb(currentFrame = currentFrame, offset = thumbX)
+            }
         }
     }
 }
@@ -784,11 +788,30 @@ private fun getSliderOffset(
 private fun calcFraction(a: Float, b: Float, pos: Float) =
     (if (b - a == 0f) 0f else (pos - a) / (b - a)).coerceIn(0f, 1f)
 
-fun getVideoFrame(context: Context?,retriever: MediaMetadataRetriever, time: Long): Bitmap? {
-    var bitmap: Bitmap? = null
+fun getVideoIntervals(framesIntervals: Long, startIndex: Int, endIndex: Int): List<Long> {
+    val intervalsList = mutableListOf<Long>()
+    for (i in startIndex until endIndex) {
+        val time = i * framesIntervals
+        intervalsList.add(time)
+    }
+    return intervalsList
+}
 
+fun getVideoThumbnails(context: Context?, uri: Uri, videoIntervals: List<Long>): List<Bitmap> {
+
+    val retriever = MediaMetadataRetriever()
+    val thumbnailsList = mutableListOf<Bitmap>()
     try {
-        bitmap = retriever.getFrameAtTime(time,MediaMetadataRetriever.OPTION_CLOSEST)
+        retriever.setDataSource(context, uri);
+        videoIntervals.forEach {
+            val microSecondTime = it * 1000000
+            val bitmap =
+                retriever.getFrameAtTime(microSecondTime, MediaMetadataRetriever.OPTION_CLOSEST)
+            if (bitmap != null) {
+                thumbnailsList.add(bitmap)
+            }
+        }
+
     } catch (ex: RuntimeException) {
         ex.printStackTrace()
     } finally {
@@ -798,7 +821,7 @@ fun getVideoFrame(context: Context?,retriever: MediaMetadataRetriever, time: Lon
             ex.printStackTrace()
         }
     }
-    return bitmap
+    return thumbnailsList
 }
 
 private const val PLAYER_SEEK_BACK_INCREMENT = 5 * 1000L // 5 seconds
